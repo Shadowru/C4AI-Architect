@@ -1,0 +1,31 @@
+# config/config.yaml
+ollama:
+  base_url: "http://localhost:11434"
+  model: "codellama:13b"
+  fallback_models:
+    - "mistral:7b"
+    - "llama2:13b"
+
+scanner:
+  ignore_patterns:
+    - "node_modules"
+    - "venv"
+    - ".git"
+    - "__pycache__"
+    - "*.pyc"
+  
+  max_file_size: 1048576  # 1MB
+
+analyzer:
+  llm_batch_size: 5
+  use_cache: true
+  cache_ttl: 3600
+
+renderer:
+  formats:
+    - "plantuml"
+    - "mermaid"
+  
+  plantuml:
+    include_legend: true
+    direction: "TB"

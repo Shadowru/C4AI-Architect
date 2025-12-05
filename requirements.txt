@@ -1,13 +1,18 @@
-tree-sitter==0.20.1
-tree-sitter-python==0.20.1
-tree-sitter-java==0.20.0
-tree-sitter-javascript==0.20.0
-tree-sitter-go==0.19.1
-pyyaml==6.0
-python-hcl2==4.3.0
-networkx==3.1
-transformers==4.35.0
-torch==2.1.0
-langchain==0.0.340
-llama-cpp-python==0.2.20
-pydantic==2.4.2
+# requirements.txt
+# Core
+pyyaml==6.0.1
+networkx==3.2.1
+ollama==0.1.6
+
+# Парсинг
+python-hcl2==4.3.2
+javalang==0.13.0
+
+# Utilities
+gitpython==3.1.40
+pathlib==1.0.1
+dataclasses-json==0.6.3
+
+# Optional
+plantuml==0.3.0
+#pygraphviz==1.11

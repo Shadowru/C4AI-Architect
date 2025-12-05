@@ -1,103 +1,163 @@
-#!/usr/bin/env python3
-"""
-C4AI Architect - Система восстановления архитектурных схем из кода
-"""
-
-import sys
-from pathlib import Path
-from loguru import logger
+# main.py
 import argparse
+import logging
+from pathlib import Path
+import yaml
+import sys
 
-# Добавляем путь к модулям
-sys.path.append(str(Path(__file__).parent))
+from src.scanner.repository_scanner import RepositoryScanner
+from src.analyzer.semantic_analyzer import SemanticAnalyzer
+from src.analyzer.llm_engine import LLMEngine
+from src.generator.c4_model_builder import C4ModelBuilder
+from src.renderer.plantuml_renderer import PlantUMLRenderer
 
-from config import Config
-from modules.repository_analyzer import RepositoryAnalyzer
-
-def setup_logging():
-    """Настройка логирования"""
-    logger.remove()  # Убираем дефолтный обработчик
-    logger.add(
-        sys.stdout,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-        level="INFO"
+def setup_logging(level=logging.INFO):
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler('c4_recovery.log', encoding='utf-8')
+        ]
     )
-    logger.add(
-        Config.OUTPUT_DIR / "logs" / "c4ai_{time}.log",
-        rotation="1 day",
-        retention="7 days",
-        level="DEBUG"
-    )
+
+def load_config(config_path: str) -> dict:
+    """Загружает конфигурацию из файла"""
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return yaml.safe_load(f)
+    except FileNotFoundError:
+        logging.warning(f"Config file {config_path} not found, using defaults")
+        return {
+            'ollama': {
+                'base_url': 'http://localhost:11434',
+                'model': 'codellama:13b'
+            }
+        }
 
 def main():
-    """Основная функция"""
-    setup_logging()
-    
-    parser = argparse.ArgumentParser(description='C4AI Architect - Восстановление архитектуры из кода')
-    parser.add_argument('repo_path', type=str, help='Путь к репозиторию')
-    parser.add_argument('--analyze', action='store_true', help='Выполнить анализ репозитория')
-    parser.add_argument('--query', type=str, help='Запрос к проиндексированному репозиторию')
+    parser = argparse.ArgumentParser(
+        description='C4 Architecture Recovery System',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python main.py /path/to/repo
+  python main.py /path/to/repo -o ./output -v
+  python main.py /path/to/repo --model llama2:13b
+        """
+    )
+    parser.add_argument('repo_path', help='Path to repository')
+    parser.add_argument('--output', '-o', default='./output', help='Output directory')
+    parser.add_argument('--config', '-c', default='./config/config.yaml', help='Config file')
+    parser.add_argument('--model', '-m', default='codellama:13b', help='Ollama model')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
+    parser.add_argument('--skip-llm', action='store_true', help='Skip LLM analysis (faster, less detailed)')
     
     args = parser.parse_args()
     
-    repo_path = Path(args.repo_path)
-    if not repo_path.exists():
-        logger.error(f"Путь не существует: {repo_path}")
-        sys.exit(1)
+    setup_logging(logging.DEBUG if args.verbose else logging.INFO)
+    logger = logging.getLogger(__name__)
     
-    # Инициализация анализатора
-    analyzer = RepositoryAnalyzer(repo_path)
+    try:
+        # Проверяем путь к репозиторию
+        repo_path = Path(args.repo_path)
+        if not repo_path.exists():
+            logger.error(f"Repository path does not exist: {args.repo_path}")
+            return 1
+        
+        # Загружаем конфигурацию
+        config = load_config(args.config)
+        
+        # Инициализация компонентов
+        logger.info("=" * 60)
+        logger.info("C4 Architecture Recovery System")
+        logger.info("=" * 60)
+        
+        logger.info(f"Repository: {args.repo_path}")
+        logger.info(f"Output: {args.output}")
+        logger.info(f"Model: {args.model}")
+        
+        # Инициализация LLM
+        logger.info("\nInitializing LLM Engine...")
+        llm_engine = LLMEngine(
+            model=args.model,
+            base_url=config.get('ollama', {}).get('base_url', 'http://localhost:11434')
+        )
+        
+        # Сканирование репозитория
+        logger.info("\nScanning repository...")
+        scanner = RepositoryScanner(args.repo_path)
+        structure = scanner.scan()
+        
+        logger.info(f"Found files:")
+        logger.info(f"  - Code files: {sum(len(files) for files in structure.code_files.values())}")
+        for lang, files in structure.code_files.items():
+            logger.info(f"    - {lang}: {len(files)}")
+        logger.info(f"  - Docker files: {len(structure.docker_files)}")
+        logger.info(f"  - Kubernetes files: {len(structure.k8s_files)}")
+        logger.info(f"  - Terraform files: {len(structure.terraform_files)}")
+        
+        # Семантический анализ
+        logger.info("\nPerforming semantic analysis...")
+        analyzer = SemanticAnalyzer(llm_engine)
+        analysis = analyzer.analyze(structure)
+        
+        logger.info(f"Analysis complete:")
+        logger.info(f"  - Containers found: {len(analysis.get('containers', []))}")
+        logger.info(f"  - Components found: {len(analysis.get('components', []))}")
+        logger.info(f"  - Dependencies: {len(analysis.get('dependencies', []))}")
+        
+        # Построение C4 модели
+        logger.info("\nBuilding C4 model...")
+        builder = C4ModelBuilder(analyzer, llm_engine)
+        repo_name = Path(args.repo_path).name
+        c4_model = builder.build(analysis, repo_name)
+        
+        # Рендеринг диаграмм
+        logger.info("\nRendering diagrams...")
+        output_path = Path(args.output)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        renderer = PlantUMLRenderer(output_path)
+        diagram_files = renderer.render_all(c4_model)
+        
+        # Результаты
+        logger.info("\n" + "=" * 60)
+        logger.info("SUCCESS! C4 diagrams generated")
+        logger.info("=" * 60)
+        
+        logger.info(f"\nGenerated {len(diagram_files)} diagrams:")
+        for file in diagram_files:
+            logger.info(f"  ✓ {file}")
+        
+        logger.info(f"\nC4 Model Summary:")
+        logger.info(f"  - Systems: {len(c4_model.systems)}")
+        logger.info(f"  - Containers: {len(c4_model.containers)}")
+        logger.info(f"  - Components: {len(c4_model.components)}")
+        logger.info(f"  - Relationships: {len(c4_model.relationships)}")
+        
+        # Insights
+        insights = analysis.get('insights', {})
+        if insights.get('patterns'):
+            patterns = insights['patterns']
+            logger.info(f"\nArchitecture Patterns:")
+            for pattern in patterns.get('patterns', [])[:3]:
+                logger.info(f"  - {pattern}")
+        
+        logger.info(f"\nOutput directory: {output_path.absolute()}")
+        logger.info("\nTo view diagrams:")
+        logger.info("  1. Install PlantUML: https://plantuml.com/download")
+        logger.info("  2. Open .puml files with PlantUML viewer")
+        logger.info("  3. Or use online: https://www.plantuml.com/plantuml/")
+        
+    except KeyboardInterrupt:
+        logger.info("\nOperation cancelled by user")
+        return 130
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        return 1
     
-    if args.analyze:
-        logger.info(f"Запуск анализа репозитория: {repo_path}")
-        result = analyzer.analyze_repository()
-        
-        # Сохранение результатов
-        import json
-        output_file = Config.OUTPUT_DIR / "analysis_result.json"
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump({
-                'stats': result['stats'],
-                'metadata': result['metadata']
-            }, f, indent=2, ensure_ascii=False)
-        
-        logger.info(f"Результаты сохранены в {output_file}")
-        
-        # Вывод краткого отчёта
-        print("\n" + "="*60)
-        print("ОТЧЁТ ПО АНАЛИЗУ РЕПОЗИТОРИЯ")
-        print("="*60)
-        print(f"Всего файлов: {result['stats']['total_files']}")
-        print(f"Обработано файлов: {result['stats']['processed_files']}")
-        print(f"Создано чанков: {result['stats']['total_chunks']}")
-        
-        print("\nЧанки по категориям:")
-        for category, count in result['stats']['chunks_by_category'].items():
-            print(f"  {category}: {count}")
-        
-        print("\nОбнаруженные технологии:")
-        for tech in result['metadata'].get('detected_technologies', []):
-            print(f"  • {tech}")
-        
-        if result['metadata'].get('services'):
-            print("\nОбнаруженные сервисы (docker-compose):")
-            for service in result['metadata']['services']:
-                print(f"  • {service}")
-    
-    elif args.query:
-        logger.info(f"Выполнение запроса: {args.query}")
-        results = analyzer.query_repository(args.query, top_k=5)
-        
-        print(f"\nРезультаты запроса '{args.query}':")
-        print("="*60)
-        for i, chunk in enumerate(results, 1):
-            print(f"\n{i}. {chunk.metadata['file_path']}")
-            print(f"   Категория: {chunk.metadata['file_category']}")
-            print(f"   Предпросмотр: {chunk.content[:200]}...")
-    
-    else:
-        logger.info("Используйте --analyze для анализа или --query для поиска")
-        parser.print_help()
+    return 0
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    exit(main())

@@ -1,121 +1,103 @@
 # src/scanner/repository_scanner.py
-
-from dataclasses import dataclass
+import os
+import git
 from pathlib import Path
-from typing import List, Dict, Set
-import yaml
-import json
-from tree_sitter import Language, Parser
-import hcl2
+from typing import List, Dict
+import logging
+from dataclasses import dataclass
 
 @dataclass
 class RepositoryStructure:
-    """Структура репозитория"""
+    root_path: Path
+    code_files: Dict[str, List[Path]]
     docker_files: List[Path]
-    kubernetes_files: List[Path]
+    k8s_files: List[Path]
     terraform_files: List[Path]
-    source_code: Dict[str, List[Path]]  # язык -> файлы
     config_files: List[Path]
-    dependencies: Dict[str, any]
 
 class RepositoryScanner:
-    """Сканер репозитория для обнаружения артефактов"""
-    
-    def __init__(self, repo_path: Path):
-        self.repo_path = repo_path
-        self.structure = RepositoryStructure(
-            docker_files=[],
-            kubernetes_files=[],
-            terraform_files=[],
-            source_code={},
-            config_files=[],
-            dependencies={}
-        )
-    
+    def __init__(self, repo_path: str):
+        self.repo_path = Path(repo_path)
+        self.logger = logging.getLogger(__name__)
+        
+        self.file_patterns = {
+            'code': {
+                'python': ['*.py'],
+                'java': ['*.java'],
+                'javascript': ['*.js', '*.ts'],
+                'go': ['*.go'],
+            },
+            'docker': ['Dockerfile', 'docker-compose.yml', 'docker-compose.yaml'],
+            'kubernetes': ['*.yaml', '*.yml'],
+            'terraform': ['*.tf', '*.tfvars'],
+            'config': ['*.json', '*.yaml', '*.yml', '*.toml', '*.ini']
+        }
+        
     def scan(self) -> RepositoryStructure:
-        """Сканирование репозитория"""
-        self._scan_docker_files()
-        self._scan_kubernetes_files()
-        self._scan_terraform_files()
-        self._scan_source_code()
-        self._scan_dependencies()
-        return self.structure
-    
-    def _scan_docker_files(self):
-        """Поиск Dockerfile и docker-compose"""
-        patterns = ['**/Dockerfile*', '**/docker-compose*.yml']
-        for pattern in patterns:
-            self.structure.docker_files.extend(
-                self.repo_path.rglob(pattern)
-            )
-    
-    def _scan_kubernetes_files(self):
-        """Поиск K8s манифестов"""
-        for yaml_file in self.repo_path.rglob('*.yaml'):
-            if self._is_kubernetes_manifest(yaml_file):
-                self.structure.kubernetes_files.append(yaml_file)
-    
-    def _scan_terraform_files(self):
-        """Поиск Terraform файлов"""
-        self.structure.terraform_files = list(
-            self.repo_path.rglob('*.tf')
+        """Сканирует репозиторий и классифицирует файлы"""
+        self.logger.info(f"Scanning repository: {self.repo_path}")
+        
+        structure = RepositoryStructure(
+            root_path=self.repo_path,
+            code_files={},
+            docker_files=[],
+            k8s_files=[],
+            terraform_files=[],
+            config_files=[]
         )
-    
-    def _scan_source_code(self):
-        """Сканирование исходного кода"""
-        language_extensions = {
-            'python': ['.py'],
-            'java': ['.java'],
-            'javascript': ['.js', '.ts'],
-            'go': ['.go'],
-            'csharp': ['.cs']
-        }
         
-        for lang, extensions in language_extensions.items():
-            files = []
-            for ext in extensions:
-                files.extend(self.repo_path.rglob(f'*{ext}'))
-            if files:
-                self.structure.source_code[lang] = files
+        # Сканируем файлы
+        for root, dirs, files in os.walk(self.repo_path):
+            # Пропускаем служебные директории
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['node_modules', 'venv', '__pycache__']]
+            
+            root_path = Path(root)
+            
+            for file in files:
+                file_path = root_path / file
+                self._classify_file(file_path, structure)
+                
+        self.logger.info(f"Scan complete. Found {sum(len(files) for files in structure.code_files.values())} code files")
+        return structure
     
-    def _scan_dependencies(self):
-        """Анализ зависимостей"""
-        dependency_files = {
-            'requirements.txt': self._parse_requirements,
-            'package.json': self._parse_package_json,
-            'pom.xml': self._parse_pom,
-            'go.mod': self._parse_go_mod
-        }
+    def _classify_file(self, file_path: Path, structure: RepositoryStructure):
+        """Классифицирует файл по типу"""
+        file_name = file_path.name.lower()
         
-        for filename, parser in dependency_files.items():
-            for dep_file in self.repo_path.rglob(filename):
-                self.structure.dependencies[str(dep_file)] = parser(dep_file)
+        # Docker файлы
+        if any(pattern in file_name for pattern in self.file_patterns['docker']):
+            structure.docker_files.append(file_path)
+            return
+            
+        # Terraform файлы
+        if file_path.suffix in ['.tf', '.tfvars']:
+            structure.terraform_files.append(file_path)
+            return
+            
+        # Kubernetes файлы (требуют дополнительной проверки содержимого)
+        if file_path.suffix in ['.yaml', '.yml']:
+            if self._is_k8s_file(file_path):
+                structure.k8s_files.append(file_path)
+            else:
+                structure.config_files.append(file_path)
+            return
+            
+        # Код
+        for lang, patterns in self.file_patterns['code'].items():
+            if any(file_path.match(pattern) for pattern in patterns):
+                if lang not in structure.code_files:
+                    structure.code_files[lang] = []
+                structure.code_files[lang].append(file_path)
+                return
     
-    def _is_kubernetes_manifest(self, file_path: Path) -> bool:
-        """Проверка, является ли файл K8s манифестом"""
+    def _is_k8s_file(self, file_path: Path) -> bool:
+        """Проверяет, является ли YAML файл конфигурацией Kubernetes"""
         try:
-            with open(file_path) as f:
+            import yaml
+            with open(file_path, 'r') as f:
                 content = yaml.safe_load(f)
-                return isinstance(content, dict) and 'kind' in content
+                if isinstance(content, dict):
+                    return 'apiVersion' in content and 'kind' in content
         except:
-            return False
-    
-    def _parse_requirements(self, file_path: Path) -> List[str]:
-        with open(file_path) as f:
-            return [line.strip() for line in f if line.strip() and not line.startswith('#')]
-    
-    def _parse_package_json(self, file_path: Path) -> Dict:
-        with open(file_path) as f:
-            data = json.load(f)
-            return {
-                'dependencies': data.get('dependencies', {}),
-                'devDependencies': data.get('devDependencies', {})
-            }
-    
-    def _parse_pom(self, file_path: Path) -> Dict:
-        # Упрощенная версия
-        return {'file': str(file_path)}
-    
-    def _parse_go_mod(self, file_path: Path) -> List[str]:
-        with open(file_path) as f:
-            return [line.strip() for line in f if line.strip().startswith('require')]
+            pass
+        return False
